@@ -1,0 +1,108 @@
+name: Build Kernel marble (Droidspaces) - LineageOS lineage-23.2
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_xiaomi_sm8450.git
+  KERNEL_BRANCH: lineage-23.2
+  CLANG_REPO: https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git
+  CLANG_BRANCH: lineage-20.0
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Bersihkan ruang disk runner
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          large-packages: false
+
+      - name: Tambah swap (jaga-jaga OOM saat link kernel)
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Install dependency build
+        run: |
+          sudo apt update
+          sudo apt install -y git device-tree-compiler lz4 xz-utils zlib1g-dev openjdk-17-jdk \
+            gcc g++ python3 python-is-python3 p7zip-full android-sdk-libsparse-utils erofs-utils \
+            default-jdk gnupg flex bison gperf build-essential zip curl libc6-dev libncurses-dev \
+            libx11-dev libreadline-dev libgl1 libgl1-mesa-dev make bc grep tofrodos \
+            python3-markdown libxml2-utils xsltproc libtinfo6 kmod openssl libelf-dev pahole \
+            libssl-dev libarchive-tools zstd rsync --fix-missing
+
+      - name: Clone source kernel (${{ env.KERNEL_BRANCH }})
+        run: |
+          git clone --depth=1 -b "${{ env.KERNEL_BRANCH }}" "${{ env.KERNEL_REPO }}" kernel_marble
+          cd kernel_marble
+          make kernelversion
+
+      - name: Cache toolchain Clang
+        id: clang-cache
+        uses: actions/cache@v5
+        with:
+          path: clang-r416183b
+          key: clang-${{ env.CLANG_BRANCH }}
+
+      - name: Clone toolchain Clang (kalau cache miss)
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: git clone --depth=1 -b "${{ env.CLANG_BRANCH }}" "${{ env.CLANG_REPO }}" clang-r416183b
+
+      - name: Clone patch kABI Droidspaces
+        run: git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS.git
+
+      - name: Terapkan patch kABI Droidspaces
+        working-directory: kernel_marble
+        run: |
+          patch -p1 < ../Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+          patch -p1 < ../Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
+
+      - name: Edit gki_defconfig untuk Droidspaces
+        working-directory: kernel_marble
+        run: |
+          ./scripts/config --file arch/arm64/configs/gki_defconfig \
+            --enable CONFIG_SYSVIPC \
+            --enable CONFIG_POSIX_MQUEUE \
+            --enable CONFIG_IPC_NS \
+            --enable CONFIG_PID_NS \
+            --enable CONFIG_DEVTMPFS \
+            --enable CONFIG_NETFILTER_XT_MATCH_ADDRTYPE \
+            --enable CONFIG_NETFILTER_XT_TARGET_REJECT \
+            --enable CONFIG_NETFILTER_XT_TARGET_LOG \
+            --enable CONFIG_NETFILTER_XT_MATCH_RECENT \
+            --enable CONFIG_IP_SET \
+            --enable CONFIG_IP_SET_HASH_IP \
+            --enable CONFIG_IP_SET_HASH_NET \
+            --enable CONFIG_NETFILTER_XT_SET \
+            --enable CONFIG_TMPFS_POSIX_ACL \
+            --enable CONFIG_TMPFS_XATTR
+
+      - name: Ganti Full LTO ke ThinLTO (hindari OOM saat link)
+        working-directory: kernel_marble
+        run: |
+          ./scripts/config --file arch/arm64/configs/gki_defconfig \
+            --disable CONFIG_LTO_CLANG_FULL \
+            --enable CONFIG_LTO_CLANG_THIN
+
+      - name: Compile kernel
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/clang-r416183b/bin:${PATH}"
+          cd kernel_marble
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
+
+      - name: Upload Image hasil compile
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-Image-marble-droidspaces
+          path: kernel_marble/out/arch/arm64/boot/Image
+          retention-days: 14
+          if-no-files-found: error
