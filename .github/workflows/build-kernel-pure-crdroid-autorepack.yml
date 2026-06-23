@@ -76,9 +76,9 @@ jobs:
       - name: Setup Magiskboot dan Repack boot.img
         run: |
           echo "=> Mengunduh Magisk versi terbaru..."
-          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
-          curl -LO $MAGISK_URL
-          unzip -o Magisk-*.apk -d magisk_ext
+          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*Magisk-v.*apk" | head -n 1 | cut -d '"' -f 4)
+          curl -L -o magisk.apk "$MAGISK_URL"
+          unzip -o magisk.apk -d magisk_ext
           
           echo "=> Menyiapkan magiskboot..."
           cp magisk_ext/lib/x86_64/libmagiskboot.so magiskboot
