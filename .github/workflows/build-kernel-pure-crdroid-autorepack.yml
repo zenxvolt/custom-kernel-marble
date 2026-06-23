@@ -7,15 +7,10 @@ env:
   KERNEL_REPO: https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git
   KERNEL_BRANCH: 16.0-marble
   # ==========================================================================
-  # FIX #1 — CLANG VERSION MISMATCH (KRITIS):
-  # Workflow lama pakai clang-r416183b = LLVM 12.x (era Android 13 / LineageOS 20).
-  # Device kamu menjalankan kernel yang dikompilasi dengan clang 21.0.0 (r563880c):
-  #   "clang version 21.0.0 ... based on r563880c"  ← dari Settings > About phone
-  # Pakai clang yang jauh lebih tua berisiko:
-  #   a) Compile error — source 16.0-marble bisa pakai fitur C++ yang hanya ada di LLVM 17+
-  #   b) ABI drift — optimasi berbeda → struct layout bisa bergeser, modul vendor_dlkm gagal load
-  # Solusi: pakai ZyCromerZ Clang 21.0.0 (drop-in replacement, diunduh via GitHub API).
-  # Jika suatu saat ZyCromerZ tidak punya 21.0.0, ubah filter jq di step download.
+  # FIX #1 — CLANG VERSION MATCH (OFFICIAL AOSP):
+  # Menggunakan official AOSP Clang r563880c (LLVM 21.0.0) langsung dari server
+  # Google agar sama persis dengan compiler bawaan ROM saat ini.
+  # Metode unduhan diganti ke Git Sparse-Checkout untuk kestabilan 100% tanpa limit API.
   # ==========================================================================
   MSM_ARCH: waipio
   VARIANT: consolidate
@@ -37,7 +32,7 @@ jobs:
 
       - name: Tambah swap (jaga-jaga OOM saat link kernel)
         run: |
-          sudo fallocate -l 20G /swapfile
+          sudo fallocate -l 24G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -60,69 +55,44 @@ jobs:
           make kernelversion
 
       # -----------------------------------------------------------------------
-      # FIX #1 (lanjutan) — Cache & download ZyCromerZ Clang 21.0.0
-      # FIX #2 — actions/cache@v5 → @v4 (v5 belum tentu ada; v4 = versi stabil terakhir)
+      # REVISI FIX #1 — Mengunduh Official AOSP Clang Berbasis r563880c (LLVM 21.0.0)
       # -----------------------------------------------------------------------
-      - name: Cache Clang 21.0.0 (ZyCromerZ)
+      - name: Cache AOSP Clang r563880c
         id: clang-cache
         uses: actions/cache@v4
         with:
           path: clang-toolchain
-          key: zyc-clang-21.0.0-v1
+          key: aosp-clang-r563880c-v1
 
-      - name: Download Clang 21.0.0 — ZyCromerZ (jika cache miss)
+      - name: Download AOSP Clang r563880c (jika cache miss)
         if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          echo "=> Mengunduh official AOSP Clang r563880c (LLVM 21.0.0)..."
+          
+          mkdir aosp-repo
+          cd aosp-repo
+          git init
+          git remote add origin https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          
+          # Aktifkan sparse-checkout untuk hanya mengambil folder r563880c saja
+          git config core.sparseCheckout true
+          echo "clang-r563880c/*" >> .git/info/sparse-checkout
+          
+          # Unduh secara efisien dengan blob filter
+          git fetch --depth=1 --filter=blob:none origin main
+          git checkout FETCH_HEAD
+          
+          echo "=> Memindahkan toolchain ke root clang-toolchain..."
+          cd ..
           mkdir -p clang-toolchain
-
-          echo "=> Mencari rilis ZyCromerZ Clang 21.0.0 via GitHub API..."
-          RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/ZyCromerZ/Clang/releases" \
-            | jq '[.[] | select(.tag_name | startswith("21.0.0"))] | .[0]')
-
-          CLANG_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-          CLANG_URL=$(echo "$RELEASE_JSON" \
-            | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url')
-
-          if [ -z "$CLANG_URL" ] || [ "$CLANG_URL" = "null" ]; then
-            echo "::error::Tidak ditemukan rilis ZyCromerZ Clang 21.0.0."
-            echo "::error::Cek https://github.com/ZyCromerZ/Clang/releases dan pin CLANG_URL secara manual jika perlu."
-            exit 1
-          fi
-
-          echo "=> Mengunduh Clang ${CLANG_TAG}: ${CLANG_URL}"
-          curl -L -o clang.tar.gz "$CLANG_URL"
-
-          echo "=> Mengekstrak toolchain..."
-          tar -C clang-toolchain -xzf clang.tar.gz
-
-          # Beberapa tarball mengekstrak ke sub-folder; normalisasi ke root agar PATH konsisten
-          if [ ! -f "clang-toolchain/bin/clang" ]; then
-            SUBDIR=$(find clang-toolchain -maxdepth 1 -mindepth 1 -type d | head -1)
-            if [ -n "$SUBDIR" ]; then
-              echo "=> Sub-folder terdeteksi (${SUBDIR}), memindahkan ke root..."
-              mv "$SUBDIR"/* clang-toolchain/
-              rmdir "$SUBDIR" 2>/dev/null || true
-            fi
-          fi
-
-          rm clang.tar.gz
+          mv aosp-repo/clang-r563880c/* clang-toolchain/
+          
+          rm -rf aosp-repo
+          
           echo "=> Verifikasi toolchain:"
           clang-toolchain/bin/clang --version
 
-      # =====================================================================
-      # PERBAIKAN UTAMA (tidak berubah dari versi asli — sudah benar):
-      # Build resmi crDroid untuk kernel ini TIDAK hanya pakai gki_defconfig
-      # polos. File build.config.msm.gki & build.config.msm.waipio di repo
-      # kernel ini menggabungkan fragment tambahan di atas gki_defconfig:
-      #   - arch/arm64/configs/vendor/<MSM_ARCH>_GKI.config        (selalu)
-      #   - arch/arm64/configs/consolidate.fragment                (variant consolidate)
-      #   - arch/arm64/configs/vendor/<MSM_ARCH>_consolidate.config (variant consolidate)
-      # Tanpa langkah ini, kernel yang dihasilkan kemungkinan besar berbeda
-      # Kconfig/ABI-nya dari kernel yang sebenarnya dipakai build resmi crDroid
-      # -> driver platform Xiaomi/Qualcomm bisa hilang, dan/atau modul
-      # vendor_dlkm yang sudah terpasang bisa gagal di-load.
-      # =====================================================================
       - name: Gabungkan defconfig GKI + fragment platform waipio
         working-directory: kernel_marble
         run: |
@@ -141,8 +111,6 @@ jobs:
               ./scripts/kconfig/merge_config.sh -m -O out out/.config "$f"
             else
               echo "::warning::Fragment '$f' tidak ditemukan di branch ${{ env.KERNEL_BRANCH }}."
-              echo "::warning::Cek ulang nama file di arch/arm64/configs/vendor/ pada repo kernel,"
-              echo "::warning::karena tanpa fragment ini hasil build kemungkinan tidak cocok dengan build resmi crDroid."
             fi
           done
 
@@ -153,7 +121,6 @@ jobs:
             --disable CONFIG_LTO_CLANG_FULL \
             --enable CONFIG_LTO_CLANG_THIN
 
-      # FIX #1 (lanjutan) — PATH sekarang menunjuk ke clang-toolchain, bukan clang-r416183b
       - name: Compile kernel (gki_defconfig + fragment resmi, tanpa fitur tambahan)
         run: |
           export PATH="${GITHUB_WORKSPACE}/clang-toolchain/bin:${PATH}"
@@ -185,10 +152,6 @@ jobs:
           chmod +x magiskboot
 
           echo "=> Mengekstrak stock_boot.zip..."
-          # PENTING: boot.img di dalam stock_boot.zip HARUS diambil dari build
-          # crDroid 16.0/marble yang SAMA dengan yang sedang/akan terpasang di
-          # device (bukan boot.img stock MIUI/HyperOS), agar ramdisk & cmdline
-          # tetap cocok dengan vendor_boot/vendor_dlkm yang sudah ada.
           unzip stock_boot.zip
 
           echo "=> Membongkar boot.img asli..."
@@ -200,7 +163,6 @@ jobs:
           echo "=> Merakit ulang boot.img..."
           ./magiskboot repack boot.img custom-boot.img
 
-      # FIX #3 — actions/upload-artifact@v7 TIDAK EXIST → diganti @v4 (BLOCKER utama!)
       - name: Upload Custom Boot Image
         uses: actions/upload-artifact@v4
         with:
