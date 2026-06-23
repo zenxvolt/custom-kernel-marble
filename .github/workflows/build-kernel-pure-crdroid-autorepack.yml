@@ -1,11 +1,11 @@
-name: Build Kernel marble (Pure LineageOS) - lineage-23.2
+name: Build Kernel marble (Pure crDroid) + Auto Repack
 
 on:
   workflow_dispatch:
 
 env:
-  KERNEL_REPO: https://github.com/LineageOS/android_kernel_xiaomi_sm8450.git
-  KERNEL_BRANCH: lineage-23.2
+  KERNEL_REPO: https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git
+  KERNEL_BRANCH: 16.0-marble
   CLANG_REPO: https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git
   CLANG_BRANCH: lineage-20.0
 
@@ -15,6 +15,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Checkout repository (untuk mengambil stock_boot.zip)
+        uses: actions/checkout@v4
+
       - name: Bersihkan ruang disk runner
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -63,10 +66,34 @@ jobs:
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
 
-      - name: Upload Image hasil compile
+      - name: Setup Magiskboot dan Repack boot.img
+        run: |
+          echo "=> Mengunduh Magisk versi terbaru..."
+          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
+          curl -LO $MAGISK_URL
+          unzip -o Magisk-*.apk -d magisk_ext
+          
+          echo "=> Menyiapkan magiskboot..."
+          cp magisk_ext/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          
+          echo "=> Mengekstrak stock_boot.zip..."
+          # Pastikan kamu sudah mengupload stock_boot.zip ke repo GitHub-mu!
+          unzip stock_boot.zip
+          
+          echo "=> Membongkar boot.img asli..."
+          ./magiskboot unpack boot.img
+          
+          echo "=> Memasukkan kernel hasil compile..."
+          cp kernel_marble/out/arch/arm64/boot/Image kernel
+          
+          echo "=> Merakit ulang boot.img..."
+          ./magiskboot repack boot.img custom-boot.img
+
+      - name: Upload Custom Boot Image
         uses: actions/upload-artifact@v7
         with:
-          name: kernel-Image-marble-pure-lineage
-          path: kernel_marble/out/arch/arm64/boot/Image
+          name: custom-boot-marble-crdroid
+          path: custom-boot.img
           retention-days: 14
           if-no-files-found: error
