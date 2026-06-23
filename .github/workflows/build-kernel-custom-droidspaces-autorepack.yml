@@ -6,12 +6,6 @@ on:
 env:
   KERNEL_REPO: https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git
   KERNEL_BRANCH: 16.0-marble
-  # ==========================================================================
-  # FIX #1 — CLANG VERSION MATCH (OFFICIAL AOSP):
-  # Menggunakan official AOSP Clang r563880c (LLVM 21.0.0) langsung dari server
-  # Google agar sama persis dengan compiler bawaan ROM saat ini.
-  # Metode unduhan diganti ke Git Sparse-Checkout untuk kestabilan 100% tanpa limit API.
-  # ==========================================================================
   MSM_ARCH: waipio
   VARIANT: consolidate
 
@@ -21,7 +15,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout repository (untuk mengambil stock_boot.zip)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Bersihkan ruang disk runner
@@ -30,7 +24,7 @@ jobs:
           tool-cache: true
           large-packages: false
 
-      - name: Tambah swap (jaga-jaga OOM saat link kernel)
+      - name: Tambah swap
         run: |
           sudo fallocate -l 24G /swapfile
           sudo chmod 600 /swapfile
@@ -55,60 +49,67 @@ jobs:
           make kernelversion
 
       # -----------------------------------------------------------------------
-      # REVISI FIX #1 — Mengunduh Official AOSP Clang Berbasis r563880c (LLVM 21.0.0)
+      # FIX FINAL — Unduh ZyCromerZ Clang 21.0.0 via GitHub CLI (gh)
       # -----------------------------------------------------------------------
-      - name: Cache AOSP Clang r563880c
+      - name: Cache Clang 21.0.0 (ZyCromerZ)
         id: clang-cache
         uses: actions/cache@v4
         with:
           path: clang-toolchain
-          key: aosp-clang-r563880c-v1
+          key: zyc-clang-21.0.0-v2
 
-      - name: Download AOSP Clang r563880c (jika cache miss)
+      - name: Download Clang 21.0.0 — ZyCromerZ (jika cache miss)
         if: steps.clang-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "=> Mengunduh official AOSP Clang r563880c (LLVM 21.0.0)..."
-          
-          mkdir aosp-repo
-          cd aosp-repo
-          git init
-          git remote add origin https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
-          
-          # Aktifkan sparse-checkout untuk hanya mengambil folder r563880c saja
-          git config core.sparseCheckout true
-          echo "clang-r563880c/*" >> .git/info/sparse-checkout
-          
-          # Unduh secara efisien dengan blob filter
-          git fetch --depth=1 --filter=blob:none origin main
-          git checkout FETCH_HEAD
-          
-          echo "=> Memindahkan toolchain ke root clang-toolchain..."
-          cd ..
           mkdir -p clang-toolchain
-          mv aosp-repo/clang-r563880c/* clang-toolchain/
+
+          echo "=> Mencari rilis ZyCromerZ Clang 21.0.0 menggunakan GitHub CLI..."
           
-          rm -rf aosp-repo
+          # gh api --paginate akan menembus batas 30 rilis dan mencari tag yang diawali "21.0.0"
+          CLANG_TAG=$(gh api repos/ZyCromerZ/Clang/releases --paginate -q '.[].tag_name' | grep -E '^21\.0\.0' | head -n 1 || true)
+
+          if [ -z "$CLANG_TAG" ]; then
+            echo "::error::Tidak ditemukan rilis dengan tag 21.0.0 di repositori ZyCromerZ."
+            exit 1
+          fi
+
+          echo "=> Ditemukan tag: ${CLANG_TAG}"
+          echo "=> Mengunduh file rilis..."
           
+          gh release download "$CLANG_TAG" -R ZyCromerZ/Clang -p "*.tar.gz" -O clang.tar.gz
+
+          echo "=> Mengekstrak toolchain..."
+          tar -C clang-toolchain -xzf clang.tar.gz
+
+          if [ ! -f "clang-toolchain/bin/clang" ]; then
+            SUBDIR=$(find clang-toolchain -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -n "$SUBDIR" ]; then
+              echo "=> Sub-folder terdeteksi (${SUBDIR}), memindahkan ke root..."
+              mv "$SUBDIR"/* clang-toolchain/
+              rmdir "$SUBDIR" 2>/dev/null || true
+            fi
+          fi
+
+          rm clang.tar.gz
           echo "=> Verifikasi toolchain:"
           clang-toolchain/bin/clang --version
 
       - name: Clone patch kABI Droidspaces
         run: git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS.git
 
-      - name: Terapkan patch kABI Droidspaces (menggunakan 3_4_5)
+      - name: Terapkan patch kABI Droidspaces
         working-directory: kernel_marble
         run: |
           PATCH_DIR="../Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12"
-
           PATCH1="${PATCH_DIR}/001.GKI-below-6.12-fix_sysvipc_kabi_3_4_5.patch"
           PATCH2="${PATCH_DIR}/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch"
 
           for p in "$PATCH1" "$PATCH2"; do
             if [ ! -f "$p" ]; then
               echo "::error::Patch tidak ditemukan: $p"
-              echo "::error::Cek struktur folder di https://github.com/ravindu644/Droidspaces-OSS"
-              echo "::error::dan sesuaikan path patch di workflow ini."
               exit 1
             fi
           done
@@ -136,7 +137,7 @@ jobs:
               echo "=> Menggabungkan fragment: $f"
               ./scripts/kconfig/merge_config.sh -m -O out out/.config "$f"
             else
-              echo "::warning::Fragment '$f' tidak ditemukan, cek ulang nama file di repo kernel pada branch ${{ env.KERNEL_BRANCH }}."
+              echo "::warning::Fragment '$f' tidak ditemukan."
             fi
           done
 
@@ -185,28 +186,19 @@ jobs:
             | jq -r '.assets[] | select(.name | test("Magisk-v.*\\.apk$")) | .browser_download_url' \
             | head -n 1)
 
-          if [ -z "${MAGISK_URL}" ] || [ "${MAGISK_URL}" = "null" ]; then
-            echo "::error::Gagal mendapatkan URL APK Magisk dari GitHub API (cek rate limit/format response)."
+          if [ -z "${MAGISK_URL}" ]; then
+            echo "::error::Gagal mendapatkan URL APK Magisk."
             exit 1
           fi
 
           curl -L -o magisk.apk "$MAGISK_URL"
           unzip -o magisk.apk -d magisk_ext
-
-          echo "=> Menyiapkan magiskboot..."
           cp magisk_ext/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot
 
-          echo "=> Mengekstrak stock_boot.zip..."
           unzip stock_boot.zip
-
-          echo "=> Membongkar boot.img asli..."
           ./magiskboot unpack boot.img
-
-          echo "=> Memasukkan kernel hasil compile..."
           cp kernel_marble/out/arch/arm64/boot/Image kernel
-
-          echo "=> Merakit ulang boot.img..."
           ./magiskboot repack boot.img custom-boot.img
 
       - name: Upload Custom Boot Image
