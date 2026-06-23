@@ -1,4 +1,4 @@
-name: Build Kernel marble (crDroid + Droidspaces) + Auto Repack
+name: Build Kernel marble (crDroid + Droidspaces) + Clang 21
 
 on:
   workflow_dispatch:
@@ -6,27 +6,25 @@ on:
 env:
   KERNEL_REPO: https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git
   KERNEL_BRANCH: 16.0-marble
-  CLANG_REPO: https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git
-  CLANG_BRANCH: lineage-20.0
 
 jobs:
   build-kernel:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
-      - name: Checkout repository (untuk mengambil stock_boot.zip)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Bersihkan ruang disk runner
+      - name: Bersihkan ruang disk runner (Maksimal)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
-          large-packages: false
+          large-packages: true
 
-      - name: Tambah swap (jaga-jaga OOM saat link kernel)
+      - name: Tambah swap GIGANTIC 24GB (Bypass OOM Full LTO)
         run: |
-          sudo fallocate -l 8G /swapfile
+          sudo fallocate -l 24G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -48,16 +46,16 @@ jobs:
           cd kernel_marble
           make kernelversion
 
-      - name: Cache toolchain Clang
-        id: clang-cache
-        uses: actions/cache@v5
-        with:
-          path: clang-r416183b
-          key: clang-${{ env.CLANG_BRANCH }}
-
-      - name: Clone toolchain Clang (kalau cache miss)
-        if: steps.clang-cache.outputs.cache-hit != 'true'
-        run: git clone --depth=1 -b "${{ env.CLANG_BRANCH }}" "${{ env.CLANG_REPO }}" clang-r416183b
+      - name: Download Clang 21 (r563880c) murni dari Google AOSP
+        run: |
+          mkdir clang-r563880c
+          cd clang-r563880c
+          git init
+          git remote add origin https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          git sparse-checkout init --cone
+          git sparse-checkout set clang-r563880c
+          git pull origin main --depth=1
+          cd ..
 
       - name: Clone patch kABI Droidspaces
         run: git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS.git
@@ -88,19 +86,12 @@ jobs:
             --enable CONFIG_TMPFS_POSIX_ACL \
             --enable CONFIG_TMPFS_XATTR
 
-      - name: Ganti Full LTO ke ThinLTO (Mencegah OOM di vmlinux)
-        working-directory: kernel_marble
+      - name: Compile kernel (Full LTO, Clang 21 Asli)
         run: |
-          ./scripts/config --file arch/arm64/configs/gki_defconfig \
-            --disable CONFIG_LTO_CLANG_FULL \
-            --enable CONFIG_LTO_CLANG_THIN
-
-      - name: Compile kernel
-        run: |
-          export PATH="${GITHUB_WORKSPACE}/clang-r416183b/bin:${PATH}"
+          export PATH="${GITHUB_WORKSPACE}/clang-r563880c/clang-r563880c/bin:${PATH}"
           cd kernel_marble
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
+          make -j2 ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          make -j2 ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
 
       - name: Setup Magiskboot dan Repack boot.img
         run: |
@@ -128,7 +119,7 @@ jobs:
       - name: Upload Custom Boot Image
         uses: actions/upload-artifact@v7
         with:
-          name: custom-boot-marble-crdroid-droidspaces
+          name: custom-boot-marble-crdroid-droidspaces-clang21
           path: custom-boot.img
           retention-days: 14
           if-no-files-found: error
