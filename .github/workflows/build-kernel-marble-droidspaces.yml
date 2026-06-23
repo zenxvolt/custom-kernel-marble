@@ -1,18 +1,18 @@
-name: Build Kernel marble (Droidspaces) - LineageOS lineage-23.2
+name: Build Kernel marble (crDroid 16.0) - Droidspaces
 
 on:
   workflow_dispatch:
 
 env:
-  KERNEL_REPO: https://github.com/LineageOS/android_kernel_xiaomi_sm8450.git
-  KERNEL_BRANCH: lineage-23.2
+  KERNEL_REPO: https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git
+  KERNEL_BRANCH: 16.0-marble
   CLANG_REPO: https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git
   CLANG_BRANCH: lineage-20.0
 
 jobs:
   build-kernel:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Bersihkan ruang disk runner
@@ -59,7 +59,7 @@ jobs:
       - name: Clone patch kABI Droidspaces
         run: git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS.git
 
-      - name: Terapkan patch kABI Droidspaces
+      - name: Terapkan patch kABI Droidspaces (menggunakan 3_4_5)
         working-directory: kernel_marble
         run: |
           patch -p1 < ../Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_3_4_5.patch
@@ -85,12 +85,16 @@ jobs:
             --enable CONFIG_TMPFS_POSIX_ACL \
             --enable CONFIG_TMPFS_XATTR
 
-      - name: Ganti Full LTO ke ThinLTO (hindari OOM saat link)
+      - name: Matikan CFI dan LTO (Bypass Kernel Panic Bootloop)
         working-directory: kernel_marble
         run: |
           ./scripts/config --file arch/arm64/configs/gki_defconfig \
             --disable CONFIG_LTO_CLANG_FULL \
-            --enable CONFIG_LTO_CLANG_THIN
+            --disable CONFIG_LTO_CLANG_THIN \
+            --enable CONFIG_LTO_NONE \
+            --disable CONFIG_CFI_CLANG \
+            --disable CONFIG_CFI_CLANG_SHADOW \
+            --disable CONFIG_CFI_PERMISSIVE
 
       - name: Compile kernel
         run: |
