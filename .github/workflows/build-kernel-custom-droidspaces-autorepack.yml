@@ -1,4 +1,4 @@
-name: Build Kernel marble (crDroid + Droidspaces) + Auto Repack
+name: Build Kernel marble (crDroid + Droidspaces) + Auto Repack + ThinLTO
 
 on:
   workflow_dispatch:
@@ -88,12 +88,20 @@ jobs:
             --enable CONFIG_TMPFS_POSIX_ACL \
             --enable CONFIG_TMPFS_XATTR
 
+      - name: Ubah Full LTO ke ThinLTO (Mencegah OOM LTO vmlinux)
+        working-directory: kernel_marble
+        run: |
+          ./scripts/config --file arch/arm64/configs/gki_defconfig \
+            --disable CONFIG_LTO_CLANG_FULL \
+            --enable CONFIG_LTO_CLANG_THIN
+
       - name: Compile kernel
         run: |
           export PATH="${GITHUB_WORKSPACE}/clang-r416183b/bin:${PATH}"
           cd kernel_marble
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
+          # Menggunakan -j2 di akhir untuk meredam pemakaian RAM saat LTO berjalan
+          make -j2 ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
 
       - name: Setup Magiskboot dan Repack boot.img
         run: |
