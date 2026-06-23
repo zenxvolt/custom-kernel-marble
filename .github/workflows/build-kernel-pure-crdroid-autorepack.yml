@@ -59,6 +59,13 @@ jobs:
         if: steps.clang-cache.outputs.cache-hit != 'true'
         run: git clone --depth=1 -b "${{ env.CLANG_BRANCH }}" "${{ env.CLANG_REPO }}" clang-r416183b
 
+      - name: Ganti Full LTO ke ThinLTO (Mencegah OOM di vmlinux)
+        working-directory: kernel_marble
+        run: |
+          ./scripts/config --file arch/arm64/configs/gki_defconfig \
+            --disable CONFIG_LTO_CLANG_FULL \
+            --enable CONFIG_LTO_CLANG_THIN
+
       - name: Compile kernel (Murni tanpa modifikasi)
         run: |
           export PATH="${GITHUB_WORKSPACE}/clang-r416183b/bin:${PATH}"
@@ -78,7 +85,6 @@ jobs:
           chmod +x magiskboot
           
           echo "=> Mengekstrak stock_boot.zip..."
-          # Pastikan kamu sudah mengupload stock_boot.zip ke repo GitHub-mu!
           unzip stock_boot.zip
           
           echo "=> Membongkar boot.img asli..."
@@ -93,7 +99,7 @@ jobs:
       - name: Upload Custom Boot Image
         uses: actions/upload-artifact@v7
         with:
-          name: custom-boot-marble-crdroid
+          name: custom-boot-marble-pure-crdroid
           path: custom-boot.img
           retention-days: 14
           if-no-files-found: error
