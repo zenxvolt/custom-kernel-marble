@@ -256,6 +256,31 @@ jobs:
           fi
           echo "Semua config DroidSpaces aktif di out/.config."
 
+          echo "== Menonaktifkan Stack Protector secara paksa (cegah 'undefined symbol: __stack_chk_guard' saat LTO) =="
+          echo "Catatan: CONFIG_STACKPROTECTOR_PER_TASK adalah 'def_bool' yang dihitung otomatis oleh Kconfig"
+          echo "berdasarkan dukungan toolchain, BUKAN sesuatu yang bisa dipaksa lewat defconfig. Pada beberapa"
+          echo "kombinasi Clang + Full LTO, walau Kconfig mengaktifkannya, codegen tetap bisa salah dan"
+          echo "mereferensikan simbol global __stack_chk_guard di ribuan fungsi -> gagal link vmlinux."
+          echo "Solusi paling aman: matikan stack protector sepenuhnya, tanpa kondisi apa pun."
+
+          echo "Status STACKPROTECTOR sebelum fix:"
+          grep -i "STACKPROTECTOR" out/.config || echo "(tidak ada baris STACKPROTECTOR)"
+
+          sed -i 's/^CONFIG_STACKPROTECTOR_STRONG=y/# CONFIG_STACKPROTECTOR_STRONG is not set/' out/.config
+          sed -i 's/^CONFIG_STACKPROTECTOR=y/# CONFIG_STACKPROTECTOR is not set/' out/.config
+          sed -i '/^CONFIG_STACKPROTECTOR_PER_TASK/d' out/.config
+
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+            olddefconfig
+
+          echo "Status STACKPROTECTOR setelah fix:"
+          grep -i "STACKPROTECTOR" out/.config || echo "(tidak ada baris STACKPROTECTOR, berarti sudah nonaktif total)"
+
       - name: Tambah Swap Space (Mencegah OOM LTO)
         run: |
           echo "Cek swap yang sudah ada di runner:"
