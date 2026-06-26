@@ -258,8 +258,8 @@ jobs:
 
       - name: Tambah Swap Space (Mencegah OOM LTO)
         run: |
-          echo "Membuat Swap File 10GB..."
-          sudo fallocate -l 10G /swapfile
+          echo "Membuat Swap File 10GB menggunakan dd (lebih aman)..."
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=10240 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
