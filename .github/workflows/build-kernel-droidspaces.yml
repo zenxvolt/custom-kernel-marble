@@ -167,22 +167,9 @@ jobs:
           echo "Membersihkan file .rej bawaan repo..."
           find . -name "*.rej" -type f -delete
 
-          echo "== Patch 1: SYSVIPC kABI fix =="
-          applied=false
-          for variant in 6_7_8 1_2_3 3_4_5; do
-            echo "Mencoba varian ${variant}..."
-            curl -fsSL -o /tmp/sysvipc.patch "$PATCH_BASE_URL/001.GKI-below-6.12-fix_sysvipc_kabi_${variant}.patch"
-            if patch -p1 --dry-run < /tmp/sysvipc.patch > /tmp/dryrun.log 2>&1; then
-              patch -p1 < /tmp/sysvipc.patch
-              echo "Varian ${variant} berhasil diapply."
-              applied=true
-              break
-            fi
-          done
-          if [ "$applied" = false ]; then
-            echo "::error::Semua varian patch SYSVIPC gagal diapply pada source ini."
-            exit 1
-          fi
+          echo "== Patch 1: SYSVIPC kABI fix (Varian 3_4_5) =="
+          curl -fsSL -o /tmp/sysvipc.patch "$PATCH_BASE_URL/001.GKI-below-6.12-fix_sysvipc_kabi_3_4_5.patch"
+          patch -p1 < /tmp/sysvipc.patch
 
           echo "== Patch 2: POSIX_MQUEUE kABI fix (wajib utk kernel <=5.10) =="
           curl -fsSL -o /tmp/mqueue.patch "$PATCH_BASE_URL/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch"
