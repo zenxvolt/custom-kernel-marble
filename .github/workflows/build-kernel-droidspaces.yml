@@ -232,6 +232,7 @@ jobs:
         run: |
           cd "$WORK/kernel"
           make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
@@ -259,6 +260,7 @@ jobs:
         run: |
           cd "$WORK/kernel"
           make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
