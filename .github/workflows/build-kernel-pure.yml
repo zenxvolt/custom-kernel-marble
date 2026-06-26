@@ -1,0 +1,256 @@
+name: Build Custom Kernel Marble (Pure)
+
+# Cara pakai:
+# 1. Letakkan file ini di repo kamu sebagai .github/workflows/build-kernel-pure.yml
+# 2. Push ke GitHub
+# 3. Buka tab "Actions" -> pilih workflow "Build Custom Kernel Marble (Pure)" -> "Run workflow"
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_img_source:
+        description: "Sumber boot.img stock"
+        required: false
+        default: "url"
+        type: choice
+        options:
+          - url
+          - repo
+      boot_img_url:
+        description: "Wajib diisi kalau boot_img_source=url. Link langsung ke boot.img stock ATAU ROM zip yang berisi boot.img"
+        required: false
+        default: "https://github.com/zenxvolt/custom-kernel-marble/releases/download/yes/boot.img"
+        type: string
+      boot_img_path:
+        description: "Wajib diisi kalau boot_img_source=repo. Path relatif di repo ke boot.img/boot.img.zip, contoh: stock/boot.img.zip"
+        required: false
+        default: ""
+        type: string
+      kernel_branch:
+        description: "Branch kernel source crDroid"
+        required: false
+        default: "16.0-marble"
+        type: string
+      create_release:
+        description: "Buat GitHub Release otomatis berisi file kernel"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  WORK: /home/runner/kernel-build
+  CLANG_ARCHIVE_URL: https://github.com/zenxvolt/custom-kernel-marble/releases/download/yes/linux-x86-531a564ba5426707dee226eccb19f104a7af5a5f-clang-r563880c.tar.gz
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Validasi input sumber boot.img
+        run: |
+          if [ "${{ inputs.boot_img_source }}" = "repo" ]; then
+            if [ -z "${{ inputs.boot_img_path }}" ]; then
+              echo "::error::boot_img_path wajib diisi kalau boot_img_source=repo"
+              exit 1
+            fi
+            if [ ! -f "${{ inputs.boot_img_path }}" ]; then
+              echo "::error::File '${{ inputs.boot_img_path }}' tidak ditemukan di repo ini."
+              exit 1
+            fi
+          else
+            if [ -z "${{ inputs.boot_img_url }}" ]; then
+              echo "::error::boot_img_url wajib diisi kalau boot_img_source=url"
+              exit 1
+            fi
+          fi
+
+      - name: Bersihkan disk runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Install dependencies build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --fix-missing \
+            git device-tree-compiler lz4 xz-utils zlib1g-dev \
+            openjdk-17-jdk gcc g++ python3 python-is-python3 \
+            p7zip-full android-sdk-libsparse-utils erofs-utils \
+            default-jdk gnupg flex bison gperf build-essential \
+            zip curl libc6-dev libncurses-dev libx11-dev \
+            libreadline-dev libgl1 libgl1-mesa-dev \
+            make repo cpio kmod openssl libelf-dev pahole \
+            libssl-dev libarchive-tools zstd rsync bc
+
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
+
+      - name: Clone kernel source
+        run: |
+          mkdir -p "$WORK"
+          git clone https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git \
+            --branch "${{ inputs.kernel_branch }}" --depth=1 "$WORK/kernel"
+          cd "$WORK/kernel"
+          make kernelversion
+
+      - name: Cache toolchain Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WORK }}/toolchain/clang
+          key: clang-r563880c-v1
+
+      - name: Download toolchain Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$WORK/toolchain/clang"
+          cd "$WORK/toolchain/clang"
+          curl -L -o clang.tar.gz "$CLANG_ARCHIVE_URL"
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
+
+      - name: Export PATH & env var toolchain
+        run: |
+          echo "$WORK/toolchain/clang/bin" >> "$GITHUB_PATH"
+          {
+            echo "ARCH=arm64"
+            echo "SUBARCH=arm64"
+            echo "CC=clang"
+            echo "CLANG_TRIPLE=aarch64-linux-gnu-"
+            echo "CROSS_COMPILE=aarch64-linux-android-"
+            echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-"
+            echo "LD=ld.lld"
+            echo "NM=llvm-nm"
+            echo "OBJCOPY=llvm-objcopy"
+            echo "OBJDUMP=llvm-objdump"
+            echo "STRIP=llvm-strip"
+            echo "AR=llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: Verifikasi Clang
+        run: clang -v
+
+      - name: Generate .config
+        run: |
+          cd "$WORK/kernel"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+            gki_defconfig \
+            vendor/waipio_GKI.config \
+            vendor/xiaomi_GKI.config \
+            vendor/marble_GKI.config \
+            vendor/debugfs.config
+
+          echo "== Menonaktifkan Stack Protector secara paksa (cegah error link vmlinux saat LTO) =="
+          sed -i 's/^CONFIG_STACKPROTECTOR_STRONG=y/# CONFIG_STACKPROTECTOR_STRONG is not set/' out/.config
+          sed -i 's/^CONFIG_STACKPROTECTOR=y/# CONFIG_STACKPROTECTOR is not set/' out/.config
+          sed -i '/^CONFIG_STACKPROTECTOR_PER_TASK/d' out/.config
+
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+            olddefconfig
+
+      - name: Tambah Swap Space (Mencegah OOM LTO)
+        run: |
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Compile kernel
+        run: |
+          cd "$WORK/kernel"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump STRIP=llvm-strip AR=llvm-ar \
+            Image
+
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: Siapkan magiskboot
+        run: |
+          cd "$WORK"
+          API_JSON=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest)
+          APK_URL=$(echo "$API_JSON" | grep -o '"browser_download_url": *"[^"]*\.apk"' | head -n1 | cut -d'"' -f4)
+          curl -L -o Magisk.apk "$APK_URL"
+          unzip -o Magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          mv magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          sudo mv magiskboot /usr/local/bin/
+
+      - name: Ambil boot.img stock
+        run: |
+          mkdir -p "$WORK/boot"
+          cd "$WORK/boot"
+
+          if [ "${{ inputs.boot_img_source }}" = "repo" ]; then
+            cp "$GITHUB_WORKSPACE/${{ inputs.boot_img_path }}" source_download
+          else
+            curl -L -o source_download "${{ inputs.boot_img_url }}"
+          fi
+
+          if unzip -l source_download > /dev/null 2>&1; then
+            unzip -o source_download boot.img
+          else
+            mv source_download boot.img
+          fi
+
+      - name: Repack boot.img dengan kernel baru
+        run: |
+          cd "$WORK/boot"
+          magiskboot unpack boot.img
+          rm -f kernel
+          cp "$WORK/kernel/out/arch/arm64/boot/Image" kernel
+          magiskboot repack boot.img
+          cp new-boot.img custom-kernel-marble-pure.img
+          cp "$WORK/kernel/out/arch/arm64/boot/Image" "$WORK/boot/Image-raw"
+
+      - name: Upload hasil sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-kernel-marble-pure-${{ github.run_number }}
+          path: |
+            ${{ env.WORK }}/boot/custom-kernel-marble-pure.img
+            ${{ env.WORK }}/boot/Image-raw
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Buat GitHub Release
+        if: ${{ inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="marble-kernel-pure-$(date +'%Y%m%d-%H%M%S')"
+          gh release create "$TAG" \
+            "$WORK/boot/custom-kernel-marble-pure.img" \
+            "$WORK/boot/Image-raw" \
+            --title "Custom Kernel Marble (Pure) - $TAG" \
+            --notes "Kernel Murni (tanpa patch DroidSpaces). Dibangun otomatis lewat GitHub Actions run #${{ github.run_number }}."
