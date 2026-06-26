@@ -57,10 +57,7 @@ permissions:
 
 env:
   WORK: /home/runner/kernel-build
-  # URL Clang diperbarui ke versi r563880c sesuai permintaan
   CLANG_ARCHIVE_URL: https://github.com/zenxvolt/custom-kernel-marble/releases/download/yes/linux-x86-531a564ba5426707dee226eccb19f104a7af5a5f-clang-r563880c.tar.gz
-  # Sumber resmi patch DroidSpaces (bukan lagi dari Telegram):
-  # https://github.com/ravindu644/Droidspaces-OSS
   PATCH_BASE_URL: https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12
 
 jobs:
@@ -90,9 +87,6 @@ jobs:
             fi
           fi
 
-      # Runner publik GitHub Actions cuma dijamin 14GB disk kosong.
-      # Kernel source + toolchain Clang + hasil build bisa gampang lebih dari itu,
-      # jadi kita bersihkan paket bawaan runner yang tidak terpakai dulu.
       - name: Bersihkan disk runner
         uses: jlumbroso/free-disk-space@main
         with:
@@ -128,8 +122,6 @@ jobs:
           cd "$WORK/kernel"
           make kernelversion
 
-      # Cache toolchain biar run berikutnya tidak perlu download ulang ~beberapa GB.
-      # Key diperbarui ke clang-r563880c
       - name: Cache toolchain Clang
         id: cache-clang
         uses: actions/cache@v4
@@ -167,12 +159,13 @@ jobs:
       - name: Verifikasi Clang
         run: clang -v
 
-      # Patch ini WAJIB sebelum mengaktifkan config DroidSpaces, kalau tidak -> bootloop.
-      # Otomatis mencoba 3 varian patch SYSVIPC (sesuai panduan troubleshooting resmi)
-      # sampai salah satu berhasil diapply tanpa konflik.
       - name: Download & apply patch DroidSpaces (kABI fix)
         run: |
           cd "$WORK/kernel"
+
+          # Membersihkan file .rej bawaan repositori agar tidak memicu kegagalan keliru
+          echo "Membersihkan file .rej bawaan repo..."
+          find . -name "*.rej" -type f -delete
 
           echo "== Patch 1: SYSVIPC kABI fix =="
           applied=false
@@ -203,8 +196,6 @@ jobs:
           fi
           echo "Semua patch berhasil diapply tanpa konflik."
 
-      # Edit defconfig satu-per-satu (bukan tempel blok di akhir file),
-      # sesuai aturan resmi DroidSpaces agar tidak menimpa nilai yang sudah benar.
       - name: Edit gki_defconfig (config DroidSpaces)
         run: |
           cd "$WORK/kernel"
@@ -223,7 +214,6 @@ jobs:
             fi
           }
 
-          # Wajib - kABI-safe selama dipasangkan dengan patch di atas
           for key in CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE CONFIG_IPC_NS CONFIG_PID_NS \
                      CONFIG_DEVTMPFS CONFIG_NETFILTER_XT_MATCH_ADDRTYPE; do
             set_config "$key"
@@ -291,9 +281,6 @@ jobs:
           sudo mv magiskboot /usr/local/bin/
           magiskboot --help
 
-      # Mendukung 2 sumber: file yang sudah ada di repo (boot_img_source=repo)
-      # atau download dari URL (boot_img_source=url). Setelah didapat, otomatis
-      # dideteksi apakah isinya boot.img mentah atau zip yang berisi boot.img.
       - name: Ambil boot.img stock
         run: |
           mkdir -p "$WORK/boot"
