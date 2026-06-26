@@ -29,6 +29,7 @@ on:
       boot_img_url:
         description: "Wajib diisi kalau boot_img_source=url. Link langsung ke boot.img stock ATAU ROM zip yang berisi boot.img"
         required: false
+        default: "https://github.com/zenxvolt/custom-kernel-marble/releases/download/yes/boot.img"
         type: string
       boot_img_path:
         description: "Wajib diisi kalau boot_img_source=repo. Path relatif di repo ke boot.img/boot.img.zip, contoh: stock/boot.img.zip"
@@ -56,7 +57,8 @@ permissions:
 
 env:
   WORK: /home/runner/kernel-build
-  CLANG_ARCHIVE_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
+  # URL Clang diperbarui ke versi r563880c sesuai permintaan
+  CLANG_ARCHIVE_URL: https://github.com/zenxvolt/custom-kernel-marble/releases/download/yes/linux-x86-531a564ba5426707dee226eccb19f104a7af5a5f-clang-r563880c.tar.gz
   # Sumber resmi patch DroidSpaces (bukan lagi dari Telegram):
   # https://github.com/ravindu644/Droidspaces-OSS
   PATCH_BASE_URL: https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12
@@ -127,12 +129,13 @@ jobs:
           make kernelversion
 
       # Cache toolchain biar run berikutnya tidak perlu download ulang ~beberapa GB.
+      # Key diperbarui ke clang-r563880c
       - name: Cache toolchain Clang
         id: cache-clang
         uses: actions/cache@v4
         with:
           path: ${{ env.WORK }}/toolchain/clang
-          key: clang-r487747c-v1
+          key: clang-r563880c-v1
 
       - name: Download toolchain Clang
         if: steps.cache-clang.outputs.cache-hit != 'true'
