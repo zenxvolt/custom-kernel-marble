@@ -1,0 +1,349 @@
+name: Build Custom Kernel Marble (DroidSpaces)
+
+# Cara pakai:
+# 1. Letakkan file ini di repo kamu sebagai .github/workflows/build-kernel-droidspaces.yml
+# 2. Push ke GitHub
+# 3. Buka tab "Actions" -> pilih workflow "Build Custom Kernel Marble (DroidSpaces)" -> "Run workflow"
+# 4. Pilih boot_img_source:
+#      - "url"  -> isi boot_img_url dengan link langsung ke boot.img / ROM zip
+#      - "repo" -> isi boot_img_path dengan path file boot.img / boot.img.zip yang sudah
+#                  kamu commit ke repo ini (lihat catatan ukuran file di bawah)
+# 5. Tunggu sampai selesai, lalu ambil hasilnya di tab Artifacts / Releases
+#
+# Catatan ukuran file kalau pakai boot_img_source=repo:
+#   GitHub menolak push file >100MB lewat git biasa (dan akan memperingatkan di atas 50MB).
+#   boot.img mentah biasanya 64-128MB, jadi WAJIB di-zip dulu sebelum commit.
+#   Kalau hasil zip-nya masih >100MB, pakai Git LFS, atau pakai boot_img_source=url saja.
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_img_source:
+        description: "Sumber boot.img stock"
+        required: false
+        default: "url"
+        type: choice
+        options:
+          - url
+          - repo
+      boot_img_url:
+        description: "Wajib diisi kalau boot_img_source=url. Link langsung ke boot.img stock ATAU ROM zip yang berisi boot.img"
+        required: false
+        type: string
+      boot_img_path:
+        description: "Wajib diisi kalau boot_img_source=repo. Path relatif di repo ke boot.img/boot.img.zip, contoh: stock/boot.img.zip"
+        required: false
+        default: ""
+        type: string
+      kernel_branch:
+        description: "Branch kernel source crDroid"
+        required: false
+        default: "16.0-marble"
+        type: string
+      enable_optional_configs:
+        description: "Aktifkan config opsional (UFW/Fail2ban/NixOS xattr)"
+        required: false
+        default: true
+        type: boolean
+      create_release:
+        description: "Buat GitHub Release otomatis berisi file kernel"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  WORK: /home/runner/kernel-build
+  CLANG_ARCHIVE_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
+  # Sumber resmi patch DroidSpaces (bukan lagi dari Telegram):
+  # https://github.com/ravindu644/Droidspaces-OSS
+  PATCH_BASE_URL: https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Validasi input sumber boot.img
+        run: |
+          if [ "${{ inputs.boot_img_source }}" = "repo" ]; then
+            if [ -z "${{ inputs.boot_img_path }}" ]; then
+              echo "::error::boot_img_path wajib diisi kalau boot_img_source=repo"
+              exit 1
+            fi
+            if [ ! -f "${{ inputs.boot_img_path }}" ]; then
+              echo "::error::File '${{ inputs.boot_img_path }}' tidak ditemukan di repo ini."
+              exit 1
+            fi
+          else
+            if [ -z "${{ inputs.boot_img_url }}" ]; then
+              echo "::error::boot_img_url wajib diisi kalau boot_img_source=url"
+              exit 1
+            fi
+          fi
+
+      # Runner publik GitHub Actions cuma dijamin 14GB disk kosong.
+      # Kernel source + toolchain Clang + hasil build bisa gampang lebih dari itu,
+      # jadi kita bersihkan paket bawaan runner yang tidak terpakai dulu.
+      - name: Bersihkan disk runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install dependencies build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --fix-missing \
+            git device-tree-compiler lz4 xz-utils zlib1g-dev \
+            openjdk-17-jdk gcc g++ python3 python-is-python3 \
+            p7zip-full android-sdk-libsparse-utils erofs-utils \
+            default-jdk gnupg flex bison gperf build-essential \
+            zip curl libc6-dev libncurses-dev libx11-dev \
+            libreadline-dev libgl1 libgl1-mesa-dev \
+            make repo cpio kmod openssl libelf-dev pahole \
+            libssl-dev libarchive-tools zstd rsync bc
+
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
+
+      - name: Clone kernel source
+        run: |
+          mkdir -p "$WORK"
+          git clone https://github.com/crdroidandroid/android_kernel_xiaomi_sm8450.git \
+            --branch "${{ inputs.kernel_branch }}" --depth=1 "$WORK/kernel"
+          cd "$WORK/kernel"
+          make kernelversion
+
+      # Cache toolchain biar run berikutnya tidak perlu download ulang ~beberapa GB.
+      - name: Cache toolchain Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WORK }}/toolchain/clang
+          key: clang-r487747c-v1
+
+      - name: Download toolchain Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$WORK/toolchain/clang"
+          cd "$WORK/toolchain/clang"
+          curl -L -o clang.tar.gz "$CLANG_ARCHIVE_URL"
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
+
+      - name: Export PATH & env var toolchain
+        run: |
+          echo "$WORK/toolchain/clang/bin" >> "$GITHUB_PATH"
+          {
+            echo "ARCH=arm64"
+            echo "SUBARCH=arm64"
+            echo "CC=clang"
+            echo "CLANG_TRIPLE=aarch64-linux-gnu-"
+            echo "CROSS_COMPILE=aarch64-linux-android-"
+            echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-"
+            echo "LD=ld.lld"
+            echo "NM=llvm-nm"
+            echo "OBJCOPY=llvm-objcopy"
+            echo "OBJDUMP=llvm-objdump"
+            echo "STRIP=llvm-strip"
+            echo "AR=llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: Verifikasi Clang
+        run: clang -v
+
+      # Patch ini WAJIB sebelum mengaktifkan config DroidSpaces, kalau tidak -> bootloop.
+      # Otomatis mencoba 3 varian patch SYSVIPC (sesuai panduan troubleshooting resmi)
+      # sampai salah satu berhasil diapply tanpa konflik.
+      - name: Download & apply patch DroidSpaces (kABI fix)
+        run: |
+          cd "$WORK/kernel"
+
+          echo "== Patch 1: SYSVIPC kABI fix =="
+          applied=false
+          for variant in 6_7_8 1_2_3 3_4_5; do
+            echo "Mencoba varian ${variant}..."
+            curl -fsSL -o /tmp/sysvipc.patch "$PATCH_BASE_URL/001.GKI-below-6.12-fix_sysvipc_kabi_${variant}.patch"
+            if patch -p1 --dry-run < /tmp/sysvipc.patch > /tmp/dryrun.log 2>&1; then
+              patch -p1 < /tmp/sysvipc.patch
+              echo "Varian ${variant} berhasil diapply."
+              applied=true
+              break
+            fi
+          done
+          if [ "$applied" = false ]; then
+            echo "::error::Semua varian patch SYSVIPC gagal diapply pada source ini."
+            exit 1
+          fi
+
+          echo "== Patch 2: POSIX_MQUEUE kABI fix (wajib utk kernel <=5.10) =="
+          curl -fsSL -o /tmp/mqueue.patch "$PATCH_BASE_URL/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch"
+          patch -p1 < /tmp/mqueue.patch
+
+          echo "== Verifikasi tidak ada file .rej =="
+          if find . -name "*.rej" | grep -q .; then
+            echo "::error::Ditemukan file .rej, ada patch yang gagal diapply:"
+            find . -name "*.rej"
+            exit 1
+          fi
+          echo "Semua patch berhasil diapply tanpa konflik."
+
+      # Edit defconfig satu-per-satu (bukan tempel blok di akhir file),
+      # sesuai aturan resmi DroidSpaces agar tidak menimpa nilai yang sudah benar.
+      - name: Edit gki_defconfig (config DroidSpaces)
+        run: |
+          cd "$WORK/kernel"
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+
+          set_config() {
+            key="$1"
+            if grep -q "^# ${key} is not set" "$DEFCONFIG"; then
+              sed -i "s/^# ${key} is not set/${key}=y/" "$DEFCONFIG"
+              echo "  [ubah]   ${key} -> y"
+            elif grep -q "^${key}=y" "$DEFCONFIG"; then
+              echo "  [skip]   ${key} sudah y"
+            else
+              echo "${key}=y" >> "$DEFCONFIG"
+              echo "  [tambah] ${key} -> y"
+            fi
+          }
+
+          # Wajib - kABI-safe selama dipasangkan dengan patch di atas
+          for key in CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE CONFIG_IPC_NS CONFIG_PID_NS \
+                     CONFIG_DEVTMPFS CONFIG_NETFILTER_XT_MATCH_ADDRTYPE; do
+            set_config "$key"
+          done
+
+          if [ "${{ inputs.enable_optional_configs }}" = "true" ]; then
+            for key in CONFIG_NETFILTER_XT_TARGET_REJECT CONFIG_NETFILTER_XT_TARGET_LOG \
+                       CONFIG_NETFILTER_XT_MATCH_RECENT CONFIG_IP_SET CONFIG_IP_SET_HASH_IP \
+                       CONFIG_IP_SET_HASH_NET CONFIG_NETFILTER_XT_SET \
+                       CONFIG_TMPFS_POSIX_ACL CONFIG_TMPFS_XATTR; do
+              set_config "$key"
+            done
+          fi
+
+      - name: Generate .config & verifikasi
+        run: |
+          cd "$WORK/kernel"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+            gki_defconfig \
+            vendor/waipio_GKI.config \
+            vendor/xiaomi_GKI.config \
+            vendor/marble_GKI.config \
+            vendor/debugfs.config
+
+          fail=false
+          for key in CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE CONFIG_IPC_NS CONFIG_PID_NS \
+                     CONFIG_DEVTMPFS CONFIG_NETFILTER_XT_MATCH_ADDRTYPE; do
+            if ! grep -q "^${key}=y" out/.config; then
+              echo "::error::${key} tidak aktif di out/.config!"
+              fail=true
+            fi
+          done
+          if [ "$fail" = true ]; then
+            exit 1
+          fi
+          echo "Semua config DroidSpaces aktif di out/.config."
+
+      - name: Compile kernel
+        run: |
+          cd "$WORK/kernel"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump STRIP=llvm-strip AR=llvm-ar \
+            Image
+
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: Siapkan magiskboot
+        run: |
+          cd "$WORK"
+          API_JSON=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest)
+          APK_URL=$(echo "$API_JSON" | grep -o '"browser_download_url": *"[^"]*\.apk"' | head -n1 | cut -d'"' -f4)
+          echo "Magisk APK: $APK_URL"
+          curl -L -o Magisk.apk "$APK_URL"
+          unzip -o Magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          mv magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          sudo mv magiskboot /usr/local/bin/
+          magiskboot --help
+
+      # Mendukung 2 sumber: file yang sudah ada di repo (boot_img_source=repo)
+      # atau download dari URL (boot_img_source=url). Setelah didapat, otomatis
+      # dideteksi apakah isinya boot.img mentah atau zip yang berisi boot.img.
+      - name: Ambil boot.img stock
+        run: |
+          mkdir -p "$WORK/boot"
+          cd "$WORK/boot"
+
+          if [ "${{ inputs.boot_img_source }}" = "repo" ]; then
+            echo "Mengambil file dari repo: ${{ inputs.boot_img_path }}"
+            cp "$GITHUB_WORKSPACE/${{ inputs.boot_img_path }}" source_download
+          else
+            echo "Mengunduh dari URL..."
+            curl -L -o source_download "${{ inputs.boot_img_url }}"
+          fi
+
+          if unzip -l source_download > /dev/null 2>&1; then
+            echo "Sumber terdeteksi sebagai ZIP. Mengekstrak boot.img..."
+            unzip -o source_download boot.img
+          else
+            echo "Sumber terdeteksi sebagai file boot.img mentah."
+            mv source_download boot.img
+          fi
+
+          ls -lh boot.img
+          cp boot.img boot_stock_backup.img
+
+      - name: Repack boot.img dengan kernel baru
+        run: |
+          cd "$WORK/boot"
+          magiskboot unpack boot.img
+          rm -f kernel
+          cp "$WORK/kernel/out/arch/arm64/boot/Image" kernel
+          magiskboot repack boot.img
+          ls -lh new-boot.img
+          cp new-boot.img custom-kernel-marble.img
+          cp "$WORK/kernel/out/arch/arm64/boot/Image" "$WORK/boot/Image-raw"
+
+      - name: Upload hasil sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-kernel-marble-${{ github.run_number }}
+          path: |
+            ${{ env.WORK }}/boot/custom-kernel-marble.img
+            ${{ env.WORK }}/boot/Image-raw
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Buat GitHub Release
+        if: ${{ inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="marble-kernel-$(date +'%Y%m%d-%H%M%S')"
+          gh release create "$TAG" \
+            "$WORK/boot/custom-kernel-marble.img" \
+            "$WORK/boot/Image-raw" \
+            --title "Custom Kernel Marble (DroidSpaces-ready) - $TAG" \
+            --notes "Dibangun otomatis lewat GitHub Actions run #${{ github.run_number }}. custom-kernel-marble.img siap diflash ke partisi boot via fastboot. Image-raw adalah kernel Image mentah (untuk AnyKernel3/metode lain)."
