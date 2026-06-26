@@ -325,7 +325,18 @@ jobs:
           mv magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
-          magiskboot --help
+
+          # Catatan: banyak sub-command magiskboot (termasuk --help) memang
+          # return exit code 1 walau berjalan normal, bukan 0 seperti CLI biasa.
+          # Jadi jangan jadikan exit code-nya sebagai penentu sukses/gagal di sini.
+          magiskboot --help || true
+
+          if [ -x /usr/local/bin/magiskboot ]; then
+            echo "magiskboot berhasil terpasang di /usr/local/bin/magiskboot"
+          else
+            echo "::error::magiskboot tidak ditemukan/tidak executable setelah instalasi."
+            exit 1
+          fi
 
       - name: Ambil boot.img stock
         run: |
