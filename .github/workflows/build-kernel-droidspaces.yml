@@ -96,7 +96,7 @@ jobs:
           haskell: true
           large-packages: true
           docker-images: true
-          swap-storage: true
+          swap-storage: false
 
       - name: Install dependencies build
         run: |
@@ -255,6 +255,16 @@ jobs:
             exit 1
           fi
           echo "Semua config DroidSpaces aktif di out/.config."
+
+      - name: Tambah Swap Space (Mencegah OOM LTO)
+        run: |
+          echo "Membuat Swap File 10GB..."
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Kondisi Memori Saat Ini:"
+          free -h
 
       - name: Compile kernel
         run: |
